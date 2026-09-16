@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -12,7 +12,32 @@ const PALETTE = ["#1f2937", "#4b5563", "#6b7280", "#9ca3af", "#d1d5db", "#374151
 
 type ChartKind = "bar" | "line" | "pie";
 
+/**
+ * useSearchParams() opts the page out of static rendering, and Next.js
+ * requires it to sit inside a Suspense boundary so the page shell can still
+ * be prerendered while the search-param-dependent content streams in. This
+ * wrapper is the fix for the build-time error:
+ *   "useSearchParams() should be wrapped in a suspense boundary"
+ */
 export default function DashboardPage() {
+  return (
+    <Suspense fallback={<DashboardFallback />}>
+      <DashboardContent />
+    </Suspense>
+  );
+}
+
+function DashboardFallback() {
+  return (
+    <main className="min-h-screen bg-neutral-50 px-6 py-12">
+      <div className="mx-auto max-w-5xl">
+        <p className="text-neutral-500">Loading dashboard...</p>
+      </div>
+    </main>
+  );
+}
+
+function DashboardContent() {
   const params = useSearchParams();
   const id = params.get("id");
 
