@@ -1,0 +1,107 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: dc_postgres
+    environment:
+      POSTGRES_USER: datacleaner
+      POSTGRES_PASSWORD: datacleaner
+      POSTGRES_DB: datacleaner
+    ports:
+      - "5433:5432"       # 5433 on the host so it does not clash with a local Postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datacleaner"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    build: .
+    container_name: dc_airflow_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &airflow_env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://datacleaner:datacleaner@postgres:5432/datacleaner
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: datacleaner
+      POSTGRES_USER: datacleaner
+      POSTGRES_PASSWORD: datacleaner
+      PIPELINE_DATA_DIR: /opt/airflow/data
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
+    volumes: &airflow_volumes
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./data:/opt/airflow/data
+      - ./logs:/opt/airflow/logs
+    command: >
+      bash -c "airflow db migrate &&
+               airflow users create --username admin --password admin
+               --firstname Admin --lastname User --role Admin
+               --email admin@example.com || true"
+
+  airflow-webserver:
+    build: .
+    container_name: dc_airflow_web
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow_env
+    volumes: *airflow_volumes
+    ports:
+      - "8080:8080"
+    command: airflow webserver
+    restart: unless-stopped
+
+  airflow-scheduler:
+    build: .
+    container_name: dc_airflow_scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow_env
+    volumes: *airflow_volumes
+    command: airflow scheduler
+    restart: unless-stopped
+
+  # Spark is a separate profile so it does not slow down your normal dev loop.
+  # Start it only when you are working on the big-data path:
+  #   docker compose --profile spark up
+  spark:
+    image: bitnami/spark:3.5
+    container_name: dc_spark
+    profiles: ["spark"]
+    environment:
+      SPARK_MODE: master
+    ports:
+      - "8081:8080"
+      - "7077:7077"
+    volumes:
+      - ./src:/opt/app/src
+      - ./data:/opt/app/data
+
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: dc_spark_worker
+    profiles: ["spark"]
+    depends_on:
+      - spark
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark:7077
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: 2
+    volumes:
+      - ./src:/opt/app/src
+      - ./data:/opt/app/data
+
+volumes:
+  pgdata:
