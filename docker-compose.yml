@@ -35,6 +35,8 @@ services:
       POSTGRES_USER: datacleaner
       POSTGRES_PASSWORD: datacleaner
       PIPELINE_DATA_DIR: /opt/airflow/data
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
     volumes: &airflow_volumes
