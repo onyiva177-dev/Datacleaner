@@ -51,7 +51,7 @@ from airflow.utils.trigger_rule import TriggerRule
 
 sys.path.insert(0, "/opt/airflow")
 
-from src import pipeline, db  # noqa: E402
+from src import pipeline, db, storage  # noqa: E402
 
 DATA_DIR = os.getenv("PIPELINE_DATA_DIR", "/opt/airflow/data")
 
@@ -63,18 +63,28 @@ default_args = {
 }
 
 
-def _paths(context) -> tuple[str, str, int | None]:
+def _paths(context) -> tuple[str, str, int | None, str | None]:
     """Read the run configuration passed when the DAG is triggered."""
     conf = context["dag_run"].conf or {}
     input_path = conf.get("input_path") or os.path.join(DATA_DIR, "samples", "sales_messy.csv")
     dataset_id = conf.get("dataset_id")
+    storage_path = conf.get("storage_path")  # where the raw upload lives in Supabase Storage
     name = os.path.basename(input_path).replace(".csv", "_cleaned.csv")
     output_path = conf.get("output_path") or os.path.join(DATA_DIR, "output", name)
-    return input_path, output_path, dataset_id
+    return input_path, output_path, dataset_id, storage_path
 
 
 def profile_data(**context):
-    input_path, _, dataset_id = _paths(context)
+    input_path, _, dataset_id, storage_path = _paths(context)
+
+    if storage_path and not os.path.exists(input_path):
+        # The raw file lives in Supabase Storage, not on this container's disk -
+        # pull it down before anything else can run. This is the step that was
+        # silently unnecessary on docker-compose (shared volume) and silently
+        # broken everywhere else.
+        print(f"[profile_data] Downloading '{storage_path}' from Supabase Storage...")
+        storage.download(storage_path, input_path)
+
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input CSV not found: {input_path}")
     profile = pipeline.step_profile(input_path, dataset_id)
@@ -88,7 +98,7 @@ def branch_on_quality(**context):
 
 
 def generate_ai_plan(**context):
-    _, _, dataset_id = _paths(context)
+    _, _, dataset_id, _ = _paths(context)
     profile = context["ti"].xcom_pull(key="profile", task_ids="profile_data")
     plan = pipeline.step_plan(profile, dataset_id)
     context["ti"].xcom_push(key="plan", value=plan)
@@ -96,7 +106,7 @@ def generate_ai_plan(**context):
 
 
 def skip_ai_planning(**context):
-    _, _, dataset_id = _paths(context)
+    _, _, dataset_id, _ = _paths(context)
     if dataset_id:
         db.set_stage(dataset_id, "planning")
     empty = {"steps": [], "source": "skipped_clean"}
@@ -106,7 +116,7 @@ def skip_ai_planning(**context):
 
 def validate_plan(**context):
     ti = context["ti"]
-    _, _, dataset_id = _paths(context)
+    _, _, dataset_id, _ = _paths(context)
     profile = ti.xcom_pull(key="profile", task_ids="profile_data")
     plan = ti.xcom_pull(key="plan", task_ids="generate_ai_plan")
     if plan is None:
@@ -118,7 +128,7 @@ def validate_plan(**context):
 
 
 def clean_data(**context):
-    input_path, output_path, dataset_id = _paths(context)
+    input_path, output_path, dataset_id, _ = _paths(context)
     validated = context["ti"].xcom_pull(key="validated", task_ids="validate_plan")
     cleaned, log = pipeline.step_clean(input_path, validated, output_path, dataset_id)
     context["ti"].xcom_push(
@@ -128,16 +138,38 @@ def clean_data(**context):
 
 
 def analyze_data(**context):
-    _, output_path, dataset_id = _paths(context)
+    _, output_path, dataset_id, _ = _paths(context)
     results = pipeline.step_analyze(output_path, dataset_id)
     return results["row_count"]
 
 
+def export_results(**context):
+    """
+    Writes the fixed-filename export bundle (cleaned.csv, cleaned.parquet,
+    powerbi_model.md, analysis.json) and uploads it to Supabase Storage under
+    cleaned/<dataset_id>/. This is what makes the dashboard's download buttons
+    and the frontend's /api/export route actually work - without this step,
+    the cleaned data exists only inside this container and disappears when
+    the task finishes.
+    """
+    _, output_path, dataset_id, _ = _paths(context)
+    if dataset_id:
+        db.set_stage(dataset_id, "exporting")
+
+    export_dir = f"/tmp/dc_export_{dataset_id or 'local'}"
+    pipeline.step_export(output_path, export_dir)
+
+    if dataset_id:
+        uploaded = storage.upload_export_bundle(dataset_id, export_dir)
+        print(f"[export_results] Uploaded: {uploaded}")
+
+
 def finalize(**context):
-    _, output_path, dataset_id = _paths(context)
+    _, output_path, dataset_id, _ = _paths(context)
     shape = context["ti"].xcom_pull(key="shape", task_ids="clean_data")
     if dataset_id:
         db.finalize_dataset(dataset_id, shape["rows"], shape["cols"], output_path)
+        db.set_stage(dataset_id, "complete")
     print(f"[finalize] Dataset {dataset_id} complete: {shape}")
 
 
@@ -169,6 +201,7 @@ with DAG(
 
     t_clean = PythonOperator(task_id="clean_data", python_callable=clean_data)
     t_analyze = PythonOperator(task_id="analyze_data", python_callable=analyze_data)
+    t_export = PythonOperator(task_id="export_results", python_callable=export_results)
     t_finalize = PythonOperator(task_id="finalize", python_callable=finalize)
 
-    t_profile >> t_branch >> [t_ai, t_skip] >> t_validate >> t_clean >> t_analyze >> t_finalize
+    t_profile >> t_branch >> [t_ai, t_skip] >> t_validate >> t_clean >> t_analyze >> t_export >> t_finalize
