@@ -66,6 +66,8 @@ export type Dataset = {
   cleaned_columns: number | null;
   cleaned_path: string | null;
   status: "pending" | "processing" | "complete" | "failed";
+  current_stage: string; // queued | profiling | planning | validating | cleaning | analyzing | complete | failed
+  stage_updated_at: string;
   error: string | null;
   created_at: string;
 };
