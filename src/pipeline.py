@@ -12,7 +12,7 @@ import os
 
 import pandas as pd
 
-from . import ai_planner, analyzer, cleaner, db, profiler, validator
+from . import ai_planner, analyzer, cleaner, db, exporters, profiler, validator
 
 
 def read_csv(path: str) -> pd.DataFrame:
@@ -133,6 +133,44 @@ def step_analyze(cleaned_path: str, dataset_id: int | None = None) -> dict:
           f"{len(results['categorical'])} categorical breakdowns, "
           f"{len(results['time_series'])} time series")
     return results
+
+
+def step_export(cleaned_path: str, export_dir: str) -> dict:
+    """
+    Writes the export bundle under FIXED filenames (cleaned.csv, cleaned.parquet,
+    powerbi_model.md, analysis.json) rather than names derived from the original
+    upload. The frontend's /api/export route reads exactly these names from
+    cleaned/<dataset_id>/, so the names must not vary by input filename.
+    """
+    df = _reinfer_dates(read_csv(cleaned_path))
+    os.makedirs(export_dir, exist_ok=True)
+
+    csv_path = os.path.join(export_dir, "cleaned.csv")
+    df.to_csv(csv_path, index=False)
+
+    try:
+        df.to_parquet(os.path.join(export_dir, "cleaned.parquet"), index=False)
+    except (ImportError, ValueError) as exc:
+        print(f"[export] Parquet export skipped: {exc}")
+
+    pbi = exporters.export_powerbi_package(df, export_dir, "dataset")
+    # export_powerbi_package writes dataset.csv/.parquet/_model.md - rename the
+    # model doc to the fixed name the frontend expects; csv/parquet above
+    # already cover the download formats.
+    fixed_model_path = os.path.join(export_dir, "powerbi_model.md")
+    if pbi["model_doc"] != fixed_model_path and os.path.exists(pbi["model_doc"]):
+        os.replace(pbi["model_doc"], fixed_model_path)
+    for extra in ("dataset.csv", "dataset.parquet"):
+        extra_path = os.path.join(export_dir, extra)
+        if os.path.exists(extra_path):
+            os.remove(extra_path)  # superseded by cleaned.csv / cleaned.parquet above
+
+    exporters.export_analysis_json(
+        analyzer.analyze(df), os.path.join(export_dir, "analysis.json")
+    )
+
+    print(f"[export] Wrote export bundle to {export_dir}")
+    return {"export_dir": export_dir}
 
 
 def run_full_pipeline(input_path: str, output_path: str,
