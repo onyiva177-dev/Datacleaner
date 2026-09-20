@@ -30,6 +30,20 @@ def get_connection():
     )
 
 
+def set_stage(dataset_id: int, stage: str) -> None:
+    """
+    Called at the START of each pipeline step. This is the real progress
+    signal the frontend polls - not a fake counter. If stage_updated_at stops
+    advancing, the frontend can tell the user a specific step is actually
+    stuck, rather than guessing.
+    """
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE datasets SET current_stage = %s, stage_updated_at = NOW() WHERE id = %s",
+            (stage, dataset_id),
+        )
+
+
 def create_dataset(filename: str, original_rows: int, original_cols: int) -> int:
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -108,7 +122,8 @@ def finalize_dataset(dataset_id: int, cleaned_rows: int, cleaned_cols: int,
 def mark_failed(dataset_id: int, error: str) -> None:
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "UPDATE datasets SET status = 'failed', error = %s WHERE id = %s",
+            "UPDATE datasets SET status = 'failed', current_stage = 'failed', "
+            "stage_updated_at = NOW(), error = %s WHERE id = %s",
             (error[:2000], dataset_id),
         )
 
