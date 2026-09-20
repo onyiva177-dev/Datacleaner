@@ -43,6 +43,8 @@ def read_csv(path: str) -> pd.DataFrame:
 
 
 def step_profile(input_path: str, dataset_id: int | None = None) -> dict:
+    if dataset_id:
+        db.set_stage(dataset_id, "profiling")
     df = read_csv(input_path)
     profile = profiler.profile_dataframe(df)
     if dataset_id:
@@ -52,11 +54,14 @@ def step_profile(input_path: str, dataset_id: int | None = None) -> dict:
     return profile
 
 
-def step_plan(profile: dict) -> dict:
+def step_plan(profile: dict, dataset_id: int | None = None) -> dict:
     """
     Branch point: clean files skip the AI entirely. This is a cost decision as
     much as a design one - no point paying for an API call on a clean file.
     """
+    if dataset_id:
+        db.set_stage(dataset_id, "planning")
+
     if not profile["needs_cleaning"]:
         print("[plan] File is already clean. Skipping AI planner.")
         return {"steps": [], "source": "skipped_clean"}
@@ -66,7 +71,9 @@ def step_plan(profile: dict) -> dict:
     return plan
 
 
-def step_validate(plan: dict, profile: dict) -> dict:
+def step_validate(plan: dict, profile: dict, dataset_id: int | None = None) -> dict:
+    if dataset_id:
+        db.set_stage(dataset_id, "validating")
     validated = validator.validate_plan(plan, profile)
     print(f"[validate] {len(validated['accepted'])} accepted, "
           f"{len(validated['rejected'])} rejected")
@@ -77,6 +84,8 @@ def step_validate(plan: dict, profile: dict) -> dict:
 
 def step_clean(input_path: str, validated: dict, output_path: str,
                dataset_id: int | None = None) -> tuple[pd.DataFrame, list]:
+    if dataset_id:
+        db.set_stage(dataset_id, "cleaning")
     df = read_csv(input_path)
     cleaned, log = cleaner.apply_plan(df, validated)
 
@@ -114,6 +123,8 @@ def _reinfer_dates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def step_analyze(cleaned_path: str, dataset_id: int | None = None) -> dict:
+    if dataset_id:
+        db.set_stage(dataset_id, "analyzing")
     df = _reinfer_dates(read_csv(cleaned_path))
     results = analyzer.analyze(df)
     if dataset_id:
@@ -128,13 +139,14 @@ def run_full_pipeline(input_path: str, output_path: str,
                       dataset_id: int | None = None) -> dict:
     """End-to-end run. Used by the CLI and by tests."""
     profile = step_profile(input_path, dataset_id)
-    plan = step_plan(profile)
-    validated = step_validate(plan, profile)
+    plan = step_plan(profile, dataset_id)
+    validated = step_validate(plan, profile, dataset_id)
     validated["source"] = plan.get("source", "unknown")
     cleaned, log = step_clean(input_path, validated, output_path, dataset_id)
     results = step_analyze(output_path, dataset_id)
 
     if dataset_id:
+        db.set_stage(dataset_id, "complete")
         db.finalize_dataset(dataset_id, cleaned.shape[0], cleaned.shape[1], output_path)
 
     return {
