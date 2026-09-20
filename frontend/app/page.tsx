@@ -14,6 +14,7 @@ const STAGE_ORDER = [
   "validating",
   "cleaning",
   "analyzing",
+  "exporting",
   "complete",
 ];
 
@@ -24,6 +25,7 @@ const STAGE_LABELS: Record<string, string> = {
   validating: "Validating plan",
   cleaning: "Cleaning data",
   analyzing: "Analyzing",
+  exporting: "Preparing downloads",
   complete: "Complete",
   failed: "Failed",
 };
