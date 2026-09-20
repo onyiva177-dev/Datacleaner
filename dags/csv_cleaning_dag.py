@@ -88,13 +88,17 @@ def branch_on_quality(**context):
 
 
 def generate_ai_plan(**context):
+    _, _, dataset_id = _paths(context)
     profile = context["ti"].xcom_pull(key="profile", task_ids="profile_data")
-    plan = pipeline.step_plan(profile)
+    plan = pipeline.step_plan(profile, dataset_id)
     context["ti"].xcom_push(key="plan", value=plan)
     return plan
 
 
 def skip_ai_planning(**context):
+    _, _, dataset_id = _paths(context)
+    if dataset_id:
+        db.set_stage(dataset_id, "planning")
     empty = {"steps": [], "source": "skipped_clean"}
     context["ti"].xcom_push(key="plan", value=empty)
     return empty
@@ -102,11 +106,12 @@ def skip_ai_planning(**context):
 
 def validate_plan(**context):
     ti = context["ti"]
+    _, _, dataset_id = _paths(context)
     profile = ti.xcom_pull(key="profile", task_ids="profile_data")
     plan = ti.xcom_pull(key="plan", task_ids="generate_ai_plan")
     if plan is None:
         plan = ti.xcom_pull(key="plan", task_ids="skip_ai_planning")
-    validated = pipeline.step_validate(plan, profile)
+    validated = pipeline.step_validate(plan, profile, dataset_id)
     validated["source"] = plan.get("source", "unknown")
     ti.xcom_push(key="validated", value=validated)
     return validated
